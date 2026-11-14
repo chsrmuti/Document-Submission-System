@@ -672,6 +672,31 @@
   .conn-banner ul { margin: 6px 0 10px 20px; }
   .conn-banner .btn { min-height: 36px; padding: 6px 14px; width: auto; }
 
+  /* ช่องค้นหารายวิชา */
+  .combo { position: relative; }
+  .combo input[type="text"] { padding-right: 40px; }
+  .combo.picked input[type="text"] { border-color: rgba(15,118,110,.55); background: var(--primary-faint); font-weight: 600; }
+  .combo-clear {
+    position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+    width: 28px; height: 28px; border: none; border-radius: 999px;
+    background: var(--slate-100); color: var(--slate-600); cursor: pointer; font-size: 13px;
+  }
+  .combo-list {
+    position: absolute; left: 0; right: 0; top: calc(100% + 6px); z-index: 20;
+    max-height: 320px; overflow-y: auto;
+    background: #fff; border: 1px solid var(--slate-200); border-radius: 14px;
+    box-shadow: 0 18px 40px rgba(15,23,42,.12); padding: 6px;
+  }
+  .combo-item {
+    padding: 9px 12px; border-radius: 10px; cursor: pointer;
+    color: var(--slate-800); font-weight: 400; font-size: 14px;
+  }
+  .combo-item .code { color: var(--slate-500); font-variant-numeric: tabular-nums; margin-right: 6px; }
+  .combo-item mark { background: #fef3c7; color: inherit; border-radius: 3px; padding: 0 1px; }
+  .combo-item.active, .combo-item:hover { background: var(--primary-faint); color: var(--primary-dark); }
+  .combo-empty { padding: 12px; color: var(--slate-500); font-size: 13px; font-weight: 400; }
+  .combo-count { padding: 4px 12px 6px; color: var(--slate-500); font-size: 12px; font-weight: 400; }
+
   .site-footer {
     margin-top: 20px;
     padding: 14px 12px 0;
@@ -771,9 +796,14 @@
 
     <div class="form-grid one">
       <label class="field">รายวิชา
-        <select id="course" onchange="updatePreview()">
-          <option value="">— กำลังโหลด... —</option>
-        </select>
+        <div class="combo" id="courseCombo">
+          <input type="text" id="courseInput" placeholder="พิมพ์รหัสหรือชื่อวิชาเพื่อค้นหา เช่น 101 หรือ เคมีอินทรีย์"
+            autocomplete="off" role="combobox" aria-expanded="false" aria-controls="courseList"
+            onfocus="openCourseList()" oninput="onCourseInput()" onkeydown="onCourseKey(event)" onblur="closeCourseListSoon()">
+          <button type="button" class="combo-clear hidden" id="courseClear" aria-label="ล้างรายวิชา" onmousedown="event.preventDefault()" onclick="clearCourse()">✕</button>
+          <input type="hidden" id="course" value="">
+          <div class="combo-list hidden" id="courseList" role="listbox"></div>
+        </div>
       </label>
     </div>
 
@@ -976,6 +1006,9 @@ var selectedDoc = "มคอ.3";
 var selectedFile = null;
 var allSubmissions = [];
 var allTeachers = [];
+var allCourses = [];
+var courseMatches = [];
+var courseActive = -1;
 var docTypes = ["มคอ.3", "มคอ.5", "R1.1", "R2"];
 var currentYear = "";
 
@@ -1058,7 +1091,7 @@ function loadInitial(force) {
     allTeachers = data.teachers || [];
     docTypes = data.docTypes || docTypes;
     fillTeacherList(allTeachers);
-    fillSelect("course", data.courses || [], "— เลือกรายวิชา —");
+    setCourseOptions(data.courses || []);
     renderDocButtons();
     renderDocFilter();
     updatePreview();
@@ -1152,6 +1185,175 @@ function fillYearSelect(years) {
   sel.innerHTML = html;
   currentYear = sel.value;
   setYear();
+}
+
+// ------------------------------------------------------------
+//  ช่องค้นหารายวิชา
+// ------------------------------------------------------------
+function setCourseOptions(arr) {
+  allCourses = unique(arr || []);
+  var input = document.getElementById("courseInput");
+  input.placeholder = allCourses.length
+    ? "พิมพ์รหัสหรือชื่อวิชาเพื่อค้นหา เช่น 101 หรือ เคมีอินทรีย์"
+    : "ยังไม่มีรายวิชา กรุณาแจ้งผู้ดูแลระบบ";
+}
+
+function normalizeSearch(text) {
+  return String(text || "").toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function filterCourses(query) {
+  var q = normalizeSearch(query);
+  if (!q) return allCourses.slice();
+  var words = q.split(" ");
+  var qNoDash = q.replace(/[-\s]/g, "");
+  var scored = [];
+  allCourses.forEach(function(c, idx) {
+    var t = normalizeSearch(c);
+    var parts = splitCourse(c);
+    var name = normalizeSearch(parts.name);
+    var code = normalizeSearch(parts.code).replace(/[-\s]/g, "");
+    var tNoDash = t.replace(/[-\s]/g, "");
+
+    // ทุกคำที่พิมพ์ต้องอยู่ในรหัสหรือชื่อวิชา (ลำดับไหนก็ได้) หรือพิมพ์รหัสแบบไม่มีขีดก็เจอ
+    var ok = words.every(function(w) { return t.indexOf(w) !== -1; }) ||
+      (qNoDash.length >= 3 && tNoDash.indexOf(qNoDash) !== -1);
+    if (!ok) return;
+
+    // ให้คะแนน: คำที่ตรงกับชื่อวิชาได้มากกว่าตรงกับรหัส, ตรงเป็นคำเต็มได้มากขึ้น
+    var score = 0;
+    var nameTokens = name.split(/[\s()]+/);
+    words.forEach(function(w) {
+      if (nameTokens.indexOf(w) !== -1) score += 4;
+      else if (name.indexOf(w) !== -1) score += 3;
+      else if (code.indexOf(w.replace(/-/g, "")) === 0) score += 2;
+      else score += 1;
+    });
+    if (qNoDash.length >= 3 && code.indexOf(qNoDash) === 0) score += 5;
+    scored.push({ c: c, s: score, i: idx });
+  });
+  scored.sort(function(a, b) { return b.s - a.s || a.i - b.i; });
+  return scored.map(function(x) { return x.c; });
+}
+
+function splitCourse(c) {
+  var m = String(c).match(/^(\S+)\s+(.*)$/);
+  if (m && /\d/.test(m[1])) return { code: m[1], name: m[2] };
+  return { code: "", name: String(c) };
+}
+
+function highlight(text, words) {
+  var safe = escapeHtml(text);
+  words.forEach(function(w) {
+    var esc = escapeHtml(w).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    safe = safe.replace(new RegExp("(" + esc + ")", "gi"), "<mark>$1</mark>");
+  });
+  return safe;
+}
+
+function renderCourseList() {
+  var list = document.getElementById("courseList");
+  var query = document.getElementById("courseInput").value;
+  var picked = document.getElementById("course").value;
+  if (picked && query === picked) query = "";
+
+  courseMatches = filterCourses(query);
+
+  if (!courseMatches.length) {
+    list.innerHTML = '<div class="combo-empty">ไม่พบรายวิชาที่ตรงกับ “' + escapeHtml(query) + '” ลองพิมพ์รหัสหรือคำอื่น</div>';
+    return;
+  }
+
+  var html = '<div class="combo-count">' + (query ? "พบ " + courseMatches.length + " วิชา" : "ทั้งหมด " + courseMatches.length + " วิชา — พิมพ์เพื่อค้นหา") + "</div>";
+  html += courseMatches.map(function(c, i) {
+    var p = splitCourse(c);
+    var words = normalizeSearch(query).split(" ").filter(Boolean);
+    // ไฮไลต์คำในชื่อวิชาก่อน คำที่ไม่อยู่ในชื่อค่อยไฮไลต์ในรหัส (กันตัวเลขสั้น ๆ ไฮไลต์เต็มรหัส)
+    var nameWords = words.filter(function(w) { return normalizeSearch(p.name).indexOf(w) !== -1; });
+    var codeWords = words.filter(function(w) { return nameWords.indexOf(w) === -1; });
+    var body = p.code
+      ? '<span class="code">' + highlight(p.code, codeWords) + "</span>" + highlight(p.name, nameWords)
+      : highlight(c, words);
+    return '<div class="combo-item' + (i === courseActive ? " active" : "") + '" role="option" data-i="' + i + '"' +
+      ' onmousedown="event.preventDefault()" onclick="pickCourse(' + i + ')">' + body + "</div>";
+  }).join("");
+  list.innerHTML = html;
+}
+
+function openCourseList() {
+  courseActive = -1;
+  renderCourseList();
+  document.getElementById("courseList").classList.remove("hidden");
+  document.getElementById("courseInput").setAttribute("aria-expanded", "true");
+}
+
+function closeCourseList() {
+  document.getElementById("courseList").classList.add("hidden");
+  document.getElementById("courseInput").setAttribute("aria-expanded", "false");
+}
+
+function closeCourseListSoon() {
+  setTimeout(function() {
+    closeCourseList();
+    // ถ้าพิมพ์ชื่อตรงกับวิชาในรายการพอดี ให้ถือว่าเลือกแล้ว ไม่งั้นคืนค่าวิชาที่เลือกไว้
+    var input = document.getElementById("courseInput");
+    var exact = allCourses.filter(function(c) { return normalizeSearch(c) === normalizeSearch(input.value); })[0];
+    if (exact) setCourse(exact);
+    else if (!input.value.trim()) setCourse("");
+    else setCourse(document.getElementById("course").value);
+  }, 120);
+}
+
+function onCourseInput() {
+  document.getElementById("course").value = "";
+  document.getElementById("courseCombo").classList.remove("picked");
+  document.getElementById("courseClear").classList.toggle("hidden", !document.getElementById("courseInput").value);
+  courseActive = 0;
+  renderCourseList();
+  document.getElementById("courseList").classList.remove("hidden");
+  updatePreview();
+}
+
+function onCourseKey(e) {
+  var list = document.getElementById("courseList");
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault();
+    if (list.classList.contains("hidden")) openCourseList();
+    var n = courseMatches.length;
+    if (!n) return;
+    courseActive = e.key === "ArrowDown" ? (courseActive + 1) % n : (courseActive - 1 + n) % n;
+    renderCourseList();
+    var el = list.querySelector('[data-i="' + courseActive + '"]');
+    if (el) el.scrollIntoView({ block: "nearest" });
+  } else if (e.key === "Enter") {
+    if (!list.classList.contains("hidden") && courseMatches.length) {
+      e.preventDefault();
+      pickCourse(courseActive >= 0 ? courseActive : 0);
+    }
+  } else if (e.key === "Escape") {
+    closeCourseList();
+  }
+}
+
+function pickCourse(i) {
+  var c = courseMatches[i];
+  if (!c) return;
+  setCourse(c);
+  closeCourseList();
+  document.getElementById("courseInput").blur();
+}
+
+function setCourse(value) {
+  document.getElementById("course").value = value || "";
+  document.getElementById("courseInput").value = value || "";
+  document.getElementById("courseCombo").classList.toggle("picked", !!value);
+  document.getElementById("courseClear").classList.toggle("hidden", !value);
+  updatePreview();
+}
+
+function clearCourse() {
+  setCourse("");
+  document.getElementById("courseInput").focus();
 }
 
 function fillSelect(id, arr, placeholder) {
@@ -1309,7 +1511,7 @@ function doSubmit() {
   if (!teacher) { showMsg("กรุณาเลือกชื่ออาจารย์", false); return; }
   if (!year) { showMsg("กรุณาเลือกปีการศึกษา", false); return; }
   if (!term) { showMsg("กรุณาเลือกภาคการศึกษา", false); return; }
-  if (!course) { showMsg("กรุณาเลือกรายวิชา", false); return; }
+  if (!course) { showMsg("กรุณาเลือกรายวิชาจากรายการ (พิมพ์ค้นหาแล้วคลิกเลือก)", false); document.getElementById("courseInput").focus(); return; }
   if (!selectedDoc) { showMsg("กรุณาเลือกประเภทเอกสาร", false); return; }
   if (!selectedFile) { showMsg("กรุณาแนบไฟล์เอกสารก่อนบันทึก", false); return; }
 
@@ -1391,7 +1593,7 @@ function doSubmit() {
 function resetForm(keepMessage) {
   selectedFile = null;
   document.getElementById("teacher").value = "";
-  document.getElementById("course").value = "";
+  setCourse("");
   document.getElementById("term").value = "1";
   selectedDoc = docTypes[0] || "มคอ.3";
   renderDocButtons();
