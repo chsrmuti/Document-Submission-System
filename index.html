@@ -778,6 +778,25 @@
     .legend-tip { margin-left: 0; }
     .matrix th:first-child, .matrix td:first-child { min-width: 160px; }
   }
+  /* แก้ไขการส่ง */
+  .records-tools { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; justify-content: space-between; margin: -4px 0 12px; }
+  .chk { display: inline-flex; gap: 6px; align-items: center; font-size: 13px; color: var(--slate-600); cursor: pointer; }
+  .row-actions { display: flex; gap: 6px; flex-wrap: nowrap; }
+  #tableWrap table { min-width: 980px; }
+  #tableWrap { max-height: 640px; overflow: auto; }
+  #tableWrap th { position: sticky; top: 0; z-index: 1; }
+  .row-actions .btn { min-height: 32px; padding: 4px 10px; font-size: 13px; border-radius: 10px; width: auto; white-space: nowrap; }
+  .row-actions .btn.danger { color: var(--danger); border-color: rgba(185,28,28,.25); }
+  tr.cancelled td { color: var(--slate-300); }
+  tr.cancelled td a { color: var(--slate-300); text-decoration: line-through; }
+  .replace-banner {
+    display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap;
+    margin-bottom: 16px; padding: 12px 16px; border-radius: 16px;
+    background: #fffbeb; border: 1px solid rgba(180,83,9,.3); color: #78350f; font-size: 14px;
+  }
+  .replace-banner .btn { min-height: 34px; padding: 4px 12px; width: auto; }
+  .st-cancel { background: #cbd5e1; }
+
   .site-footer {
     margin-top: 20px;
     padding: 14px 12px 0;
@@ -860,6 +879,8 @@
       </div>
     </div>
 
+    <div id="replaceBanner" class="replace-banner hidden"></div>
+
     <div class="form-grid">
       <label class="field">ชื่ออาจารย์
         <input type="text" id="teacher" list="teacherList" placeholder="พิมพ์อักษรแรกของชื่อเพื่อค้นหา..." oninput="updatePreview()" autocomplete="off">
@@ -939,6 +960,10 @@
         <option value="3">ภาค 3 / ฤดูร้อน</option>
       </select>
       <input type="text" id="fSearch" placeholder="ค้นหาจากอาจารย์ / รายวิชา / ชื่อไฟล์..." oninput="renderTable()">
+    </div>
+    <div class="records-tools">
+      <span class="hint">ส่งไฟล์ผิด? กด <strong>🔁 ส่งไฟล์แทน</strong> หรือ <strong>🗑 ยกเลิก</strong> ที่รายการนั้น (แก้ได้จนกว่าเอกสารจะได้รับการอนุมัติ)</span>
+      <label class="chk"><input type="checkbox" id="fShowCancelled" onchange="renderTable()"> แสดงรายการที่ยกเลิกแล้ว</label>
     </div>
 
     <div id="tableWrap" class="table-wrap">
@@ -1052,7 +1077,7 @@ var USING_FETCH_API = false;
   if (window.google && google.script && google.script.run) return;
   USING_FETCH_API = true;
 
-  var ACTIONS = ["ping", "getInitialData", "getSubmissions", "uploadFile", "updateSubmissionStatus"];
+  var ACTIONS = ["ping", "getInitialData", "getSubmissions", "uploadFile", "updateSubmissionStatus", "withdrawSubmission", "replaceSubmission"];
 
   function apiCall(action, args) {
     return fetch(API_URL, {
@@ -1098,6 +1123,7 @@ var selectedFile = null;
 var allSubmissions = [];
 var allTeachers = [];
 var allCourses = [];
+var replaceTarget = null;   // รายการเดิมที่กำลังส่งไฟล์แทน
 var courseMatches = [];
 var courseActive = -1;
 var docTypes = ["มคอ.3", "มคอ.5", "R1.1", "R2"];
@@ -1628,12 +1654,13 @@ function doSubmit() {
     btn.textContent = "⏳ กำลังส่งเอกสาร...";
     showMsg("⏳ กำลังส่งเอกสาร กรุณาอย่าปิดหน้านี้...", true);
 
-    google.script.run
+    var runner = google.script.run
       .withSuccessHandler(function(res) {
         btn.disabled = false;
-        btn.textContent = "📤 บันทึกเอกสาร";
+        btn.textContent = replaceTarget ? "🔁 ส่งไฟล์แทน" : "📤 บันทึกเอกสาร";
 
         if (res && res.ok) {
+          if (res.oldRow) replaceLocalRow(res.oldRow);
           if (res.row) {
             allSubmissions.unshift(res.row);
             renderTable();
@@ -1641,9 +1668,10 @@ function doSubmit() {
             renderOverview();
           }
 
+          var wasReplace = !!res.oldRow;
           resetForm(true);
           showMsg(
-            '✅ <strong>บันทึกสำเร็จ</strong><br>ไฟล์: ' + escapeHtml(res.name) +
+            '✅ <strong>' + (wasReplace ? "ส่งไฟล์แทนเรียบร้อย รายการเดิมถูกยกเลิกแล้ว" : "บันทึกสำเร็จ") + '</strong><br>ไฟล์: ' + escapeHtml(res.name) +
             '<br><a href="' + escapeAttr(res.url) + '" target="_blank" rel="noopener">เปิดดูไฟล์ที่ส่ง</a>',
             true
           );
@@ -1657,24 +1685,28 @@ function doSubmit() {
       })
       .withFailureHandler(function(err) {
         btn.disabled = false;
-        btn.textContent = "📤 บันทึกเอกสาร";
+        btn.textContent = replaceTarget ? "🔁 ส่งไฟล์แทน" : "📤 บันทึกเอกสาร";
         showMsg("เกิดข้อผิดพลาด: " + escapeHtml(getErrorMessage(err)), false);
       })
-      .uploadFile({
-        teacher: fileSnapshot.teacher,
-        year: fileSnapshot.year,
-        term: fileSnapshot.term,
-        course: fileSnapshot.course,
-        docType: fileSnapshot.docType,
-        fileName: fileSnapshot.fileName,
-        base64: base64,
-        mimeType: fileSnapshot.mimeType
-      });
+      ;
+
+    var payload = {
+      teacher: fileSnapshot.teacher,
+      year: fileSnapshot.year,
+      term: fileSnapshot.term,
+      course: fileSnapshot.course,
+      docType: fileSnapshot.docType,
+      fileName: fileSnapshot.fileName,
+      base64: base64,
+      mimeType: fileSnapshot.mimeType
+    };
+    if (replaceTarget) runner.replaceSubmission(replaceTarget.rowNo, payload);
+    else runner.uploadFile(payload);
   };
 
   reader.onerror = function() {
     btn.disabled = false;
-    btn.textContent = "📤 บันทึกเอกสาร";
+    btn.textContent = replaceTarget ? "🔁 ส่งไฟล์แทน" : "📤 บันทึกเอกสาร";
     showMsg("อ่านไฟล์ไม่สำเร็จ กรุณาลองใหม่อีกครั้ง", false);
   };
 
@@ -1683,6 +1715,7 @@ function doSubmit() {
 
 function resetForm(keepMessage) {
   selectedFile = null;
+  exitReplaceMode();
   document.getElementById("teacher").value = "";
   setCourse("");
   document.getElementById("term").value = "1";
@@ -1718,18 +1751,23 @@ function renderTable() {
   }
 
   var html = '<table><thead><tr>' +
-    "<th>ไฟล์</th><th>ประเภท</th><th>อาจารย์</th><th>รายวิชา</th><th>ภาค</th><th>วันที่ส่ง</th><th>สถานะ</th>" +
+    "<th>วันที่ส่ง</th><th>อาจารย์</th><th>ภาค</th><th>ประเภท</th><th>รายวิชา</th><th>สถานะ</th><th>ไฟล์</th><th>แก้ไข</th>" +
     "</tr></thead><tbody>";
 
+  rows = rows.slice().sort(function(a, b) { return parseDateText_(b.date) - parseDateText_(a.date); });
+
   rows.forEach(function(r) {
-    html += "<tr>" +
-      '<td><a href="' + escapeAttr(r.url) + '" target="_blank" rel="noopener">📄 ' + escapeHtml(r.fileName || "-") + "</a></td>" +
-      '<td><span class="badge b-blue">' + escapeHtml(r.docType || "-") + "</span></td>" +
-      "<td>" + escapeHtml(r.teacher || "-") + "</td>" +
-      "<td>" + escapeHtml(r.course || "-") + "</td>" +
-      "<td>" + escapeHtml(termLabel(r.term)) + "</td>" +
+    var cancelled = r.status === "ยกเลิก";
+    html += '<tr class="' + (cancelled ? "cancelled" : "") + '">' +
       '<td style="white-space:nowrap;color:var(--slate-500);">' + escapeHtml(r.date || "-") + "</td>" +
-      '<td><span class="badge ' + statusClass(r.status) + '">' + escapeHtml(r.status || "รอตรวจสอบ") + "</span></td>" +
+      "<td>" + escapeHtml(r.teacher || "-") + "</td>" +
+      '<td style="white-space:nowrap;">' + escapeHtml(termLabel(r.term)) + "</td>" +
+      '<td><span class="badge b-blue">' + escapeHtml(r.docType || "-") + "</span></td>" +
+      "<td>" + escapeHtml(r.course || "-") + "</td>" +
+      '<td><span class="badge ' + statusClass(r.status) + '">' + escapeHtml(r.status || "รอตรวจสอบ") + "</span>" +
+        (r.reviewNote ? '<div style="font-size:12px;color:var(--slate-500);margin-top:3px;">' + escapeHtml(r.reviewNote) + "</div>" : "") + "</td>" +
+      "<td>" + (r.url ? '<a class="open-link" href="' + escapeAttr(r.url) + '" target="_blank" rel="noopener" title="' + escapeAttr(r.fileName || "") + '">📄 เปิด</a>' : "-") + "</td>" +
+      "<td>" + renderEditActions(r) + "</td>" +
       "</tr>";
   });
 
@@ -1737,14 +1775,108 @@ function renderTable() {
   wrap.innerHTML = html;
 }
 
+function renderEditActions(r) {
+  var st = r.status || "รอตรวจสอบ";
+  if (st === "ยกเลิก") return '<span class="hint">ยกเลิกแล้ว</span>';
+  if (st === "อนุมัติ") return '<span class="hint">อนุมัติแล้ว</span>';
+  if (!r.rowNo) return '<span class="hint">กรุณารีเฟรช</span>';
+  return '<div class="row-actions">' +
+    '<button type="button" class="btn" onclick="startReplace(' + Number(r.rowNo) + ')">🔁 ส่งไฟล์แทน</button>' +
+    '<button type="button" class="btn danger" onclick="withdrawRow(' + Number(r.rowNo) + ', this)">🗑 ยกเลิก</button>' +
+    "</div>";
+}
+
+function findRow(rowNo) {
+  for (var i = 0; i < allSubmissions.length; i++) {
+    if (Number(allSubmissions[i].rowNo) === Number(rowNo)) return allSubmissions[i];
+  }
+  return null;
+}
+
+function replaceLocalRow(row) {
+  for (var i = 0; i < allSubmissions.length; i++) {
+    if (Number(allSubmissions[i].rowNo) === Number(row.rowNo)) { allSubmissions[i] = row; return; }
+  }
+}
+
+// เริ่มส่งไฟล์แทน: กรอกข้อมูลเดิมให้ในหน้าส่งเอกสาร แก้วิชา/ประเภท/ภาคได้ถ้าเลือกผิด
+function startReplace(rowNo) {
+  var r = findRow(rowNo);
+  if (!r) { showToast("ไม่พบรายการ", "กรุณารีเฟรชแล้วลองใหม่"); return; }
+
+  resetForm(false);
+  replaceTarget = r;
+
+  var yearSel = document.getElementById("yearSel");
+  if (String(yearSel.value) !== String(r.year)) {
+    for (var i = 0; i < yearSel.options.length; i++) {
+      if (String(yearSel.options[i].value) === String(r.year)) { yearSel.value = String(r.year); setYear(); break; }
+    }
+  }
+  document.getElementById("teacher").value = r.teacher || "";
+  document.getElementById("term").value = String(r.term || "1");
+  if (allCourses.indexOf(r.course) !== -1) setCourse(r.course);
+  if (docTypes.indexOf(r.docType) !== -1) { selectedDoc = r.docType; renderDocButtons(); }
+
+  var banner = document.getElementById("replaceBanner");
+  banner.innerHTML = '<div>🔁 <strong>กำลังส่งไฟล์แทน:</strong> ' + escapeHtml(r.fileName || "-") +
+    '<br><small>แนบไฟล์ใหม่ แก้ข้อมูลที่เลือกผิดได้ (วิชา/ประเภท/ภาค) แล้วกดบันทึก รายการเดิมจะถูกยกเลิกให้อัตโนมัติ</small></div>' +
+    '<button type="button" class="btn" onclick="resetForm(false)">ไม่ส่งแทนแล้ว</button>';
+  banner.classList.remove("hidden");
+  document.getElementById("submitBtn").textContent = "🔁 ส่งไฟล์แทน";
+
+  switchTab("submit", document.querySelectorAll(".tab")[0]);
+  updatePreview();
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+function exitReplaceMode() {
+  replaceTarget = null;
+  var banner = document.getElementById("replaceBanner");
+  if (banner) { banner.classList.add("hidden"); banner.innerHTML = ""; }
+  var btn = document.getElementById("submitBtn");
+  if (btn && !btn.disabled) btn.textContent = "📤 บันทึกเอกสาร";
+}
+
+function withdrawRow(rowNo, btn) {
+  var r = findRow(rowNo);
+  if (!r) return;
+  var ok = confirm("ยืนยันยกเลิกการส่งเอกสารนี้?\n\n" + (r.docType || "") + " · " + (r.course || "") + "\nของ " + (r.teacher || "") +
+    "\n\nไฟล์จะถูกนำออกจากระบบ (ผู้ดูแลกู้คืนได้ภายใน 30 วัน)");
+  if (!ok) return;
+
+  var old = btn.textContent;
+  btn.disabled = true; btn.textContent = "กำลังยกเลิก...";
+
+  google.script.run
+    .withSuccessHandler(function(res) {
+      btn.disabled = false; btn.textContent = old;
+      if (res && res.ok && res.row) {
+        replaceLocalRow(res.row);
+        if (replaceTarget && Number(replaceTarget.rowNo) === Number(rowNo)) exitReplaceMode();
+        renderTable(); renderReview(); renderOverview();
+        showToast("ยกเลิกแล้ว", "สามารถส่งเอกสารใหม่ได้ในหน้า ส่งเอกสาร");
+      } else {
+        showToast("ยกเลิกไม่สำเร็จ", res && res.error ? res.error : "ไม่ทราบสาเหตุ");
+      }
+    })
+    .withFailureHandler(function(err) {
+      btn.disabled = false; btn.textContent = old;
+      showToast("ยกเลิกไม่สำเร็จ", getErrorMessage(err));
+    })
+    .withdrawSubmission(rowNo, "ผู้ส่งยกเลิกเอง");
+}
+
 function getFilteredRows() {
   var fd = document.getElementById("fDoc") ? document.getElementById("fDoc").value : "";
   var ft = document.getElementById("fTerm") ? document.getElementById("fTerm").value : "";
   var fs = document.getElementById("fSearch") ? document.getElementById("fSearch").value.toLowerCase().trim() : "";
+  var showCancelled = document.getElementById("fShowCancelled") && document.getElementById("fShowCancelled").checked;
 
   return allSubmissions.filter(function(r) {
     var text = [r.teacher, r.course, r.fileName, r.folderPath, r.docType].join(" ").toLowerCase();
     return String(r.year) === String(currentYear) &&
+      (showCancelled || r.status !== "ยกเลิก") &&
       (!fd || r.docType === fd) &&
       (!ft || String(r.term) === String(ft)) &&
       (!fs || text.indexOf(fs) !== -1);
@@ -1794,6 +1926,7 @@ function getReviewRows() {
   return allSubmissions.filter(function(r) {
     var text = [r.teacher, r.course, r.fileName, r.folderPath, r.docType, r.status].join(" ").toLowerCase();
     return String(r.year) === String(currentYear) &&
+      r.status !== "ยกเลิก" &&
       (!fs || String(r.status || "รอตรวจสอบ") === String(fs)) &&
       (!ft || String(r.term) === String(ft)) &&
       (!fq || text.indexOf(fq) !== -1);
@@ -1900,7 +2033,7 @@ function renderOverview() {
   var matrixEl = document.getElementById("ovMatrix");
   if (!matrixEl) return;
 
-  var yearRows = allSubmissions.filter(function(r) { return String(r.year) === String(currentYear); });
+  var yearRows = allSubmissions.filter(function(r) { return String(r.year) === String(currentYear) && r.status !== "ยกเลิก"; });
   var termRows = yearRows.filter(function(r) { return !ovTerm || String(r.term) === String(ovTerm); });
   var rows = termRows.filter(function(r) { return !ovDoc || r.docType === ovDoc; });
   var docsShown = ovDoc ? [ovDoc] : docTypes.slice();
@@ -2114,6 +2247,7 @@ function countDoc(rows, doc) {
 }
 
 function statusClass(status) {
+  if (status === "ยกเลิก") return "b-gray";
   if (status === "อนุมัติ") return "b-primary";
   if (status === "ตีกลับ") return "b-red";
   if (status === "ไม่ผ่าน") return "b-gray";
